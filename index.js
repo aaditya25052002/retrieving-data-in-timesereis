@@ -1,6 +1,8 @@
 const express = require("express");
 const mongoose = require("mongoose");
 const app = express();
+const fs = require("fs");
+const path = require("path");
 
 app.use(express.json()); // for parsing JSON requests
 
@@ -102,8 +104,36 @@ app.delete("/data/:type/:value", async (req, res) => {
   }
 
   try {
-    await TimeSeries.deleteMany({ date: { $gte: start, $lt: end } });
-    res.send(`Data for the specified period ${type} = ${value} has been deleted.`);
+    const dataToDelete = await TimeSeries.find({
+      date: { $gte: start, $lt: end },
+    });
+    if (!dataToDelete.length) {
+      res.status(404).send("No data to found to delete");
+    }
+    const filePath = path.join(
+      __dirname,
+      "backups",
+      `backup_${Date.now()}.json`
+    );
+
+    fs.writeFile(
+      filePath,
+      JSON.stringify(dataToDelete, null, 2),
+      async (err) => {
+        if (err) {
+          res.status(500).send("failed to load the backup data");
+        }
+
+        try {
+          await TimeSeries.deleteMany({ date: { $gte: start, $lt: end } });
+          res.send(
+            `Data for the specified period ${type} = ${value} has been deleted.`
+          );
+        } catch (error) {
+          res.status(500).send(error);
+        }
+      }
+    );
   } catch (error) {
     res.status(500).send("Error occurred while deleting data.");
   }
@@ -114,7 +144,9 @@ app.delete("/data", async (req, res) => {
   const { startDate, endDate } = req.query;
 
   if (!startDate || !endDate) {
-    return res.status(400).send("Both startDate and endDate query parameters are required.");
+    return res
+      .status(400)
+      .send("Both startDate and endDate query parameters are required.");
   }
 
   const start = new Date(startDate);
@@ -124,14 +156,90 @@ app.delete("/data", async (req, res) => {
     return res.status(400).send("Invalid startDate or endDate provided.");
   }
 
-  try {
-    await TimeSeries.deleteMany({ date: { $gte: start, $lt: end } });
-    res.send(`Data from ${startDate} to ${endDate} has been deleted.`);
-  } catch (error) {
-    res.status(500).send("Error occurred while deleting data.");
+  // Fetch the data to be deleted
+  const dataToDelete = await TimeSeries.find({
+    date: { $gte: start, $lt: end },
+  });
+
+  // If no data to delete, return
+  if (!dataToDelete.length) {
+    return res.status(404).send("No data found for the given date range.");
   }
+
+  // Save to local file
+  const filePath = path.join(__dirname, "backups", `backup_${Date.now()}.json`);
+  fs.writeFile(filePath, JSON.stringify(dataToDelete, null, 2), async (err) => {
+    if (err) {
+      return res.status(500).send("Failed to backup data.");
+    }
+
+    // If backup is successful, delete from database
+    try {
+      await TimeSeries.deleteMany({ date: { $gte: start, $lt: end } });
+      res.send(
+        `Data from ${startDate} to ${endDate} has been deleted and backed up to ${filePath}.`
+      );
+    } catch (error) {
+      res.status(500).send("Error occurred while deleting data.");
+    }
+  });
 });
 
+
+// unix time format
+app.post("/insert-unix", async (req, res) => {
+  let today = new Date();
+  today.setHours(0, 0, 0, 0); // beginning of the day
+
+  let measurements = [];
+  for (let i = 0; i < 24; i++) {
+    let currentTimestamp = new Date(today.getTime() + i * 3600 * 1000);
+    measurements.push({
+      timestamp: currentTimestamp,
+      value: Math.random() * 100,
+    });
+  }
+
+  const result = await TimeSeries.create({
+    date: today.getTime(),  // storing in Unix timestamp format
+    measurements,
+  });
+
+  console.log("Insert result:", result);
+  res.send(measurements);
+});
+
+
+app.get("/data-unix/:type/:value", async (req, res) => {
+  let type = req.params.type;
+  let value = parseInt(req.params.value, 10);
+  let start, end;
+
+  switch (type) {
+    case "year":
+      start = new Date(value, 0, 1).getTime();
+      end = new Date(value + 1, 0, 1).getTime();
+      break;
+    case "month":
+      start = new Date(new Date().getFullYear(), value - 1, 1).getTime();
+      end = new Date(new Date().getFullYear(), value, 1).getTime();
+      break;
+    case "week":
+      start = new Date().getTime();
+      start -= 7 * 24 * 3600 * 1000 * value;
+      end = start + 7 * 24 * 3600 * 1000;
+      break;
+    case "day":
+      start = new Date(new Date().getFullYear(), new Date().getMonth(), value).getTime();
+      end = start + 24 * 3600 * 1000;
+      break;
+    default:
+      return res.status(400).send("Invalid type provided");
+  }
+
+  const data = await TimeSeries.find({ date: { $gte: start, $lt: end } });
+  res.json(data);
+});
 
 mongoose
   .connect("mongodb://0.0.0.0:27017/Timeseries")
